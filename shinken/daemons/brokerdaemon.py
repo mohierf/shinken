@@ -39,7 +39,7 @@ from shinken.log import logger
 from shinken.stats import statsmgr
 from shinken.external_command import ExternalCommand
 from shinken.http_client import HTTPClient, HTTPExceptions
-from shinken.daemon import Daemon, Interface
+from shinken.daemon import Interface
 
 class IStats(Interface):
     """
@@ -94,8 +94,6 @@ class Broker(BaseSatellite):
 
         # All broks to manage
         self.broks = []  # broks to manage
-        # broks raised this turn and that needs to be put in self.broks
-        self.broks_internal_raised = []
         # broks raised by the arbiters, we need a lock so the push can be in parallel
         # to our current activities and won't lock the arbiter
         self.arbiter_broks = []
@@ -116,7 +114,7 @@ class Broker(BaseSatellite):
         if cls_type == 'brok':
             # For brok, we TAG brok with our instance_id
             elt.instance_id = 0
-            self.broks_internal_raised.append(elt)
+            ##self.broks_internal_raised.append(elt)
             return
         elif cls_type == 'externalcommand':
             logger.debug("Enqueuing an external command '%s'", str(ExternalCommand.__dict__))
@@ -266,37 +264,11 @@ class Broker(BaseSatellite):
         logger.info("Connection OK to the %s %s", type, links[id]['name'])
 
 
-    # Get a brok. Our role is to put it in the modules
-    # DO NOT CHANGE data of b!!!
-    # REF: doc/broker-modules.png (4-5)
-    def manage_brok(self, b):
-        # Call all modules if they catch the call
-        for mod in self.modules_manager.get_internal_instances():
-            try:
-                mod.manage_brok(b)
-            except Exception, exp:
-                logger.debug(str(exp.__dict__))
-                logger.warning("The mod %s raise an exception: %s, I'm tagging it to restart later",
-                               mod.get_name(), str(exp))
-                logger.warning("Exception type: %s", type(exp))
-                logger.warning("Back trace of this kill: %s", traceback.format_exc())
-                self.modules_manager.set_to_restart(mod)
-
-
     # Add broks (a tab) to different queues for
-    # internal and external modules
+    # external modules
     def add_broks_to_queue(self, broks):
         # Ok now put in queue broks to be managed by
-        # internal modules
         self.broks.extend(broks)
-
-
-    # Each turn we get all broks from
-    # self.broks_internal_raised and we put them in
-    # self.broks
-    def interger_internal_broks(self):
-        self.add_broks_to_queue(self.broks_internal_raised)
-        self.broks_internal_raised = []
 
 
     # We will get in the broks list the broks from the arbiters,
@@ -626,7 +598,6 @@ class Broker(BaseSatellite):
         self.pollers.clear()
         self.reactionners.clear()
         self.broks = self.broks[:]
-        self.broks_internal_raised = self.broks_internal_raised[:]
         with self.arbiter_broks_lock:
             self.arbiter_broks = self.arbiter_broks[:]
         self.external_commands = self.external_commands[:]
@@ -653,17 +624,19 @@ class Broker(BaseSatellite):
 
 
     def do_loop_turn(self):
-        logger.debug("Begin Loop: managing old broks (%d)", len(self.broks))
+        # begin time to have timeout for this loop of this fonction
+        begin = time.time()
 
         # Dump modules Queues size
-        insts = [inst for inst in self.modules_manager.instances if inst.is_external]
-        for inst in insts:
+        for inst in self.modules_manager.instances:
             try:
                 logger.debug("External Queue len (%s): %s", inst.get_name(), inst.to_q.qsize())
             except Exception, exp:
                 logger.debug("External Queue len (%s): Exception! %s", inst.get_name(), exp)
 
         # Begin to clean modules
+        # ddurieux: I think it's not required because it restart module if
+        #           can't add to queue (see code some line after this)
         self.check_and_del_zombie_modules()
 
         # Maybe the arbiter ask us to wait for a new conf
@@ -687,12 +660,6 @@ class Broker(BaseSatellite):
         if self.new_conf:
             self.setup_new_conf()
 
-        # Maybe the last loop we raised some broks internally
-        # we should integrate them in broks
-        self.interger_internal_broks()
-        # Also reap broks sent from the arbiters
-        self.interger_arbiter_broks()
-
         # Main job, go get broks in our distants daemons
         types = ['scheduler', 'poller', 'reactionner', 'receiver']
         for _type in types:
@@ -710,14 +677,13 @@ class Broker(BaseSatellite):
         t0 = time.time()
         # We are sending broks as a big list, more efficient than one by one
         ext_modules = self.modules_manager.get_external_instances()
-        to_send = [b for b in self.broks if getattr(b, 'need_send_to_ext', True)]
 
         # Send our pack to all external modules to_q queue so they can get the wole packet
         # beware, the sub-process/queue can be die/close, so we put to restart the whole module
         # instead of killing ourself :)
         for mod in ext_modules:
             try:
-                mod.to_q.put(to_send)
+                mod.to_q.put(self.broks, False)
             except Exception, exp:
                 # first we must find the modules
                 logger.debug(str(exp.__dict__))
@@ -728,43 +694,10 @@ class Broker(BaseSatellite):
                 logger.warning("Back trace of this kill: %s", traceback.format_exc())
                 self.modules_manager.set_to_restart(mod)
 
-
         # No more need to send them
-        for b in to_send:
-            b.need_send_to_ext = False
         statsmgr.incr('core.put-to-external-queue', time.time() - t0)
-        logger.debug("Time to send %s broks (%d secs)", len(to_send), time.time() - t0)
-
-        # We must had new broks at the end of the list, so we reverse the list
-        self.broks.reverse()
-
-        start = time.time()
-        while len(self.broks) != 0:
-            now = time.time()
-            # Do not 'manage' more than 1s, we must get new broks
-            # every 1s
-            if now - start > 1:
-                break
-
-            b = self.broks.pop()
-            # Ok, we can get the brok, and doing something with it
-            # REF: doc/broker-modules.png (4-5)
-            # We un serialize the brok before consume it
-            b.prepare()
-            _t = time.time()
-            self.manage_brok(b)
-            statsmgr.incr('core.manage-brok', time.time() - _t)
-
-            nb_broks = len(self.broks)
-
-            # Ok we manage brok, but we still want to listen to arbiter
-            self.watch_for_new_conf(0.0)
-
-            # if we got new broks here from arbiter, we should break the loop
-            # because such broks will not be managed by the
-            # external modules before this loop (we pop them!)
-            if len(self.broks) != nb_broks:
-                break
+        logger.debug("Time to send %s broks (%d secs)", len(self.broks), time.time() - t0)
+        self.broks = []
 
         # Maybe external modules raised 'objects'
         # we should get them
@@ -772,15 +705,13 @@ class Broker(BaseSatellite):
 
         # Maybe we do not have something to do, so we wait a little
         # TODO: redone the diff management....
-        if len(self.broks) == 0:
-            while self.timeout > 0:
-                begin = time.time()
-                self.watch_for_new_conf(1.0)
-                end = time.time()
-                self.timeout = self.timeout - (end - begin)
-            self.timeout = 1.0
+        while self.timeout > 0:
+            self.watch_for_new_conf(0.5)
+            end = time.time()
+            self.timeout = self.timeout - (end - begin)
+        self.timeout = 1.0
 
-            # print "get new broks watch new conf 1: end", len(self.broks)
+        # print "get new broks watch new conf 1: end", len(self.broks)
 
         # Say to modules it's a new tick :)
         self.hook_point('tick')
@@ -830,3 +761,4 @@ class Broker(BaseSatellite):
         except Exception, exp:
             self.print_unrecoverable(traceback.format_exc())
             raise
+
