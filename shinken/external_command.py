@@ -1571,6 +1571,22 @@ class ExternalCommandManager:
             self.sched.nb_check_received += 1
             # Ok now this result will be read by scheduler the next loop
 
+            # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+            # Fred : very awful patch to keep compatibility with CNAMTS kiosks !!!
+            # !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+            # When receiving an host check result, let us automatically notify a 'host_check' service result ...
+            service = 'host_check'
+            hostname = host.get_name().decode('utf8', 'ignore')
+            # Host status : 0=UP, 1=DOWN, 2=UNREACHABLE
+            # Service status : 0=OK, 1=WARNING, 2=CRITICAL, 3=UNKNOWN
+            result = 3
+            if status_code == 0:
+                result = 0
+            cmd = '[%s] PROCESS_SERVICE_CHECK_RESULT;%s;%s;%s;%s' % (int(time.time()), hostname, service, result, plugin_output)
+
+            self.sched.run_external_command(cmd)
+
+
     # PROCESS_HOST_OUTPUT;<host_name>;<plugin_output>
     def PROCESS_HOST_OUTPUT(self, host, plugin_output):
         self.PROCESS_HOST_CHECK_RESULT(host, host.state_id, plugin_output)
