@@ -893,7 +893,16 @@ class SchedulingItem(Item):
         if c.exit_status == 0 and self.last_state in (OK_UP, 'PENDING'):
             # print "Case 1 (OK following a previous OK):
             # code:%s last_state:%s" % (c.exit_status, self.last_state)
-            self.unacknowledge_problem()
+
+            # Fred : unacknowledge_problem only if not in a downtime period
+            if self.in_scheduled_downtime:
+                logger.error("Unacknowledge should have occured but host (%s) is "
+                             "currently in a scheduled downtime !", self.host_name)
+            else:
+                self.unacknowledge_problem()
+                
+            #### self.unacknowledge_problem()
+
             # action in return can be notification or other checks (dependencies)
             if (self.state_type == 'SOFT') and self.last_state != 'PENDING':
                 if self.is_max_attempts() and self.state_type == 'SOFT':
