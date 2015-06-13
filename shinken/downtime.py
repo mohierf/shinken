@@ -204,7 +204,7 @@ class Downtime:
             comment_type = 1
         else:
             comment_type = 2
-        c = Comment(self.ref, False, "(Nagios Process)", text, comment_type, 2, 0, False, 0)
+        c = Comment(self.ref, False, "(Shinken)", text, comment_type, 2, 0, False, 0)
         self.comment_id = c.id
         self.extra_comment = c
         self.ref.add_comment(c)
